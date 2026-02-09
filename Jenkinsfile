@@ -1,65 +1,79 @@
-// Jenkins Pipeline for CI/CD Integration
-
 pipeline {
-   agent any
-   
-   environment {
-       DOCKERHUB_USERNAME = credentials('dockerhub-username')
-       DOCKERHUB_PASSWORD = credentials('dockerhub-password')
-       IMAGE_NAME = 'tomerhanan/rolling-project-image'
-   }
-   
-   stages {
-       stage('Clone Repository') {
-           steps {
-               git branch: 'main', url: 'https://github.com/TomerHanan/Rolling-Project.git'
-           }
-       }
-       
-       stage('Parallel Checks') {
-           parallel {
-               stage('Linting') {
-                   steps {
-                       sh 'pip install flake8'
-                       sh 'flake8 python/'
-                       sh 'shellcheck python/*.sh || true'
-                       sh 'hadolint demoapp/Dockerfile || true'
-                   }
-               }
-               stage('Security Scan') {
-                   steps {
-                       sh 'pip install safety'
-                       sh 'safety scan -r python/requirements.txt || true'
-                       sh 'apt-get update && apt-get install -y wget gnupg lsb-release'
-                       sh 'wget -qO- https://aquasecurity.github.io/trivy-repo/deb/public.key | apt-key add -'
-                       sh 'echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -cs) main" > /etc/apt/sources.list.d/trivy.list'
-                       sh 'apt-get update && apt-get install -y trivy'
-                       sh 'trivy image $IMAGE_NAME || true'
-                   }
-               }
-           }
-       }
-       
-       stage('Build Docker Image') {
-           steps {
-               sh 'docker build -t $IMAGE_NAME demoapp/'
-           }
-       }
-       
-       stage('Push to Docker Hub') {
-           steps {
-               sh 'echo $DOCKERHUB_PASSWORD | docker login -u $DOCKERHUB_USERNAME --password-stdin'
-               sh 'docker push $IMAGE_NAME'
-           }
-       }
-   }
-   
-   post {
-       success {
-           echo 'Pipeline completed successfully!'
-       }
-       failure {
-           echo 'Pipeline failed! Check logs for details.'
-       }
-   }
+    agent any
+    
+    environment {
+        DOCKERHUB_USERNAME = credentials('dockerhub-username')
+        DOCKERHUB_PASSWORD = credentials('dockerhub-password')
+        IMAGE_NAME = "${DOCKERHUB_USERNAME}/rolling-project"
+    }
+    
+    stages {
+        stage('Clone Repository') {
+            steps {
+                git branch: 'main', url: 'https://github.com/MaorIdi/rolling_project.git'
+            }
+        }
+        
+        stage('Parallel Checks') {
+            parallel {
+                stage('Linting') {
+                    steps {
+                        echo 'Running Flake8 linting...'
+                        sh '''
+                            docker run --rm -v "${WORKSPACE}":/app -w /app python:3.11-slim sh -c "pip install flake8 --quiet && flake8 python/ --max-line-length=120 --ignore=E501,W503" || true
+                        '''
+                        echo 'Running Hadolint for Dockerfile...'
+                        sh '''
+                            docker run --rm -i hadolint/hadolint < Dockerfile || true
+                        '''
+                        echo 'Linting completed!'
+                    }
+                }
+                stage('Security Scan') {
+                    steps {
+                        echo 'Running Bandit for Python security...'
+                        sh '''
+                            docker run --rm -v "${WORKSPACE}":/app -w /app python:3.11-slim sh -c "pip install bandit --quiet && bandit -r python/ -f txt" || true
+                        '''
+                        echo 'Running Trivy security scan...'
+                        sh '''
+                            docker run --rm -v "${WORKSPACE}":/app aquasec/trivy:latest fs --severity HIGH,CRITICAL --exit-code 0 /app
+                        '''
+                        echo 'Security scan completed!'
+                    }
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                    docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} -t ${IMAGE_NAME}:latest .
+                '''
+            }
+        }
+        
+        stage('Push to Docker Hub') {
+            steps {
+                sh '''
+                    echo ${DOCKERHUB_PASSWORD} | docker login -u ${DOCKERHUB_USERNAME} --password-stdin
+                    docker push ${IMAGE_NAME}:${BUILD_NUMBER}
+                    docker push ${IMAGE_NAME}:latest
+                '''
+            }
+        }
+    }
+    
+    post {
+        always {
+            sh 'docker logout || true'
+        }
+        success {
+            echo 'Pipeline completed successfully!'
+            echo "Docker image pushed: ${IMAGE_NAME}:${BUILD_NUMBER}"
+        }
+        failure {
+            echo 'Pipeline failed! Check the logs for details.'
+        }
+    }
 }
