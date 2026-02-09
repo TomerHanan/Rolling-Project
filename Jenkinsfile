@@ -29,7 +29,11 @@ pipeline {
                stage('Security Scan') {
                    steps {
                        sh 'pip install safety'
-                       sh 'safety check -r python/requirements.txt || true'
+                       sh 'safety scan -r python/requirements.txt || true'
+                       sh 'apt-get update && apt-get install -y wget gnupg lsb-release'
+                       sh 'wget -qO- https://aquasecurity.github.io/trivy-repo/deb/public.key | apt-key add -'
+                       sh 'echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -cs) main" > /etc/apt/sources.list.d/trivy.list'
+                       sh 'apt-get update && apt-get install -y trivy'
                        sh 'trivy image $IMAGE_NAME || true'
                    }
                }
