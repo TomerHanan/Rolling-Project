@@ -1,79 +1,81 @@
 pipeline {
-    agent any
-    
-    environment {
-        DOCKERHUB_USERNAME = credentials('dockerhub-username')
-        DOCKERHUB_PASSWORD = credentials('dockerhub-password')
-        IMAGE_NAME = "${DOCKERHUB_USERNAME}/rolling-project"
+    agent {
+        label 'agent2'
     }
-    
+
+    environment {
+        // Correct way to handle credentials to avoid Groovy interpolation warnings
+        DOCKERHUB_CREDENTIALS = credentials('dockerhub-credentials-id') 
+        IMAGE_NAME = "your-dockerhub-username/rolling-project"
+        IMAGE_TAG = "${env.BUILD_NUMBER}"
+    }
+
     stages {
-        stage('Clone Repository') {
+        stage('Initialize & Check') {
             steps {
-                git branch: 'main', url: 'https://github.com/TomerHanan/Rolling-Project.git'
+                // Verify the files actually exist before starting
+                sh '''
+                    echo "Checking workspace content:"
+                    ls -F
+                    if [ ! -f Dockerfile ]; then
+                        echo "ERROR: Dockerfile not found in root!"
+                        exit 1
+                    fi
+                '''
             }
         }
-        
+
         stage('Parallel Checks') {
             parallel {
                 stage('Linting') {
                     steps {
-                        echo 'Running Flake8 linting...'
-                        sh '''
-                            docker run --rm -v "${WORKSPACE}":/app -w /app python:3.11-slim sh -c "pip install flake8 --quiet && flake8 python/ --max-line-length=120 --ignore=E501,W503" || true
-                        '''
-                        echo 'Running Hadolint for Dockerfile...'
-                        sh '''
-                            docker run --rm -i hadolint/hadolint < Dockerfile || true
-                        '''
-                        echo 'Linting completed!'
+                        echo "Running Flake8 linting..."
+                        // Note: Ensure the 'python/' directory exists in your repo root
+                        sh 'docker run --rm -v $(pwd):/app -w /app python:3.11-slim sh -c "pip install flake8 --quiet && flake8 . --max-line-length=120 --ignore=E501,W503"'
+                        
+                        echo "Running Hadolint for Dockerfile..."
+                        sh 'docker run --rm -v $(pwd):/app -w /app hadolint/hadolint < Dockerfile || true'
                     }
                 }
+
                 stage('Security Scan') {
                     steps {
-                        echo 'Running Bandit for Python security...'
-                        sh '''
-                            docker run --rm -v "${WORKSPACE}":/app -w /app python:3.11-slim sh -c "pip install bandit --quiet && bandit -r python/ -f txt" || true
-                        '''
-                        echo 'Running Trivy security scan...'
-                        sh '''
-                            docker run --rm -v "${WORKSPACE}":/app aquasec/trivy:latest fs --severity HIGH,CRITICAL --exit-code 0 /app
-                        '''
-                        echo 'Security scan completed!'
+                        echo "Running Bandit for Python security..."
+                        sh 'docker run --rm -v $(pwd):/app -w /app python:3.11-slim sh -c "pip install bandit --quiet && bandit -r . -f txt"'
+                        
+                        echo "Running Trivy security scan..."
+                        sh 'docker run --rm -v $(pwd):/app aquasec/trivy:latest fs --severity HIGH,CRITICAL --exit-code 0 /app'
                     }
                 }
             }
         }
-        
+
         stage('Build Docker Image') {
             steps {
-                sh '''
-                    docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} -t ${IMAGE_NAME}:latest .
-                '''
+                sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -t ${IMAGE_NAME}:latest ."
             }
         }
-        
+
         stage('Push to Docker Hub') {
             steps {
                 sh '''
-                    echo ${DOCKERHUB_PASSWORD} | docker login -u ${DOCKERHUB_USERNAME} --password-stdin
-                    docker push ${IMAGE_NAME}:${BUILD_NUMBER}
+                    echo $DOCKERHUB_CREDENTIALS_PSW | docker login -u $DOCKERHUB_CREDENTIALS_USR --password-stdin
+                    docker push ${IMAGE_NAME}:${IMAGE_TAG}
                     docker push ${IMAGE_NAME}:latest
                 '''
             }
         }
     }
-    
+
     post {
         always {
-            sh 'docker logout || true'
+            sh 'docker logout'
         }
         success {
-            echo 'Pipeline completed successfully!'
-            echo "Docker image pushed: ${IMAGE_NAME}:${BUILD_NUMBER}"
+            echo "Pipeline succeeded! Image pushed: ${IMAGE_NAME}:${IMAGE_TAG}"
         }
         failure {
-            echo 'Pipeline failed! Check the logs for details.'
+            echo "Pipeline failed! Check the logs above for specific tool errors."
         }
     }
 }
